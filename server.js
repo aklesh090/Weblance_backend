@@ -72,6 +72,23 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+  // Timeouts to prevent hanging on cold starts / slow SMTP
+  connectionTimeout: 10000, // 10s to establish TCP connection
+  greetingTimeout: 10000,   // 10s for SMTP server greeting
+  socketTimeout: 15000,     // 15s for socket inactivity
+  pool: true,               // Reuse SMTP connections
+  maxConnections: 3,
+  maxMessages: 50,
+});
+
+// Verify SMTP connection on startup so the pool is warm
+transporter.verify()
+  .then(() => console.log('SMTP transporter verified — ready to send emails'))
+  .catch((err) => console.warn('SMTP verification failed (will retry on first send):', err.message));
+
+// Health endpoint for uptime monitors (e.g. UptimeRobot) to keep Render awake
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', db: dbConnected, timestamp: new Date().toISOString() });
 });
 
 app.post('/api/contact', async (req, res) => {
@@ -98,19 +115,33 @@ app.post('/api/contact', async (req, res) => {
   };
 
   try {
+    // Save to DB — isolate so DB failure doesn't block email
     if (dbConnected && contactsCollection) {
-      await contactsCollection.insertOne(contactRecord);
-      console.log('Saved contact submission to MongoDB');
+      try {
+        await contactsCollection.insertOne(contactRecord);
+        console.log('Saved contact submission to MongoDB');
+      } catch (dbErr) {
+        console.error('MongoDB insert failed (continuing with email):', dbErr.message);
+      }
     } else {
       console.log('Database not connected. Skipping MongoDB insert.');
     }
 
-    await transporter.sendMail(mailOptions);
-    console.log('Email sent via SMTP to', process.env.CONTACT_RECEIVER);
-
-    return res.json({ success: true, message: 'Message sent successfully.' });
+    // Send email with one retry on transient failure
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log('Email sent via SMTP to', process.env.CONTACT_RECEIVER, `(attempt ${attempt})`);
+        return res.json({ success: true, message: 'Message sent successfully.' });
+      } catch (smtpErr) {
+        console.error(`SMTP attempt ${attempt} failed:`, smtpErr.message);
+        if (attempt === 2) throw smtpErr;
+        // Brief pause before retry
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
   } catch (error) {
-    console.error('Error in contact endpoint:', error);
+    console.error('Error in contact endpoint:', error.message);
     return res.status(500).json({ error: 'Failed to send message. Please try again later.' });
   }
 });
