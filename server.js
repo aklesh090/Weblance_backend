@@ -37,6 +37,12 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Weblancee backend is running. Use POST /api/contact to submit contact messages.' });
 });
 
+let lastError = null;
+
+app.get('/api/logs', (req, res) => {
+  res.json({ lastError });
+});
+
 let contactsCollection;
 let dbConnected = false;
 
@@ -141,8 +147,9 @@ app.post('/api/contact', async (req, res) => {
       }
     }
   } catch (error) {
+    lastError = { message: error.message, stack: error.stack, time: new Date().toISOString() };
     console.error('Error in contact endpoint:', error.message);
-    return res.status(500).json({ error: 'Failed to send message. Please try again later.' });
+    return res.status(500).json({ error: 'Failed to send message. Please try again later.', details: error.message });
   }
 });
 
