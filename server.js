@@ -71,9 +71,9 @@ async function initializeDatabase() {
 }
 
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: process.env.SMTP_SECURE === 'true',
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: 465, // Force 465 (SMTPS) since Render blocks port 587
+  secure: true, // Port 465 requires secure: true
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
@@ -153,7 +153,14 @@ app.post('/api/contact', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Weblancee backend running on port ${port}`);
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(port, () => {
+    console.log(`Weblancee backend running on port ${port}`);
+    initializeDatabase();
+  });
+} else {
+  // In production (Vercel), initialize database but don't bind to a port
   initializeDatabase();
-});
+}
+
+module.exports = app;
