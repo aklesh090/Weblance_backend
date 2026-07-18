@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
-const { MongoClient } = require('mongodb');
+const { Pool } = require('pg');
 require('dotenv').config();
 
 const app = express();
@@ -43,28 +43,38 @@ app.get('/api/logs', (req, res) => {
   res.json({ lastError });
 });
 
-let contactsCollection;
+let pgPool;
 let dbConnected = false;
 
 async function initializeDatabase() {
-  if (!process.env.MONGO_URI) {
-    console.warn('WARNING: MONGO_URI is not defined. Running without database support.');
+  if (!process.env.DATABASE_URL) {
+    console.warn('WARNING: DATABASE_URL is not defined. Running without database support.');
     return;
   }
 
   try {
-    const client = new MongoClient(process.env.MONGO_URI, {
-      connectTimeoutMS: 5000,
-      serverSelectionTimeoutMS: 5000,
+    pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
     });
 
-    await client.connect();
-    const db = client.db(process.env.MONGO_DB_NAME || 'weblancee');
-    contactsCollection = db.collection('contacts');
+    const client = await pgPool.connect();
+    // Create table if it doesn't exist
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS contacts (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL,
+        phone VARCHAR(50),
+        message TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    client.release();
     dbConnected = true;
-    console.log('Successfully connected to MongoDB Atlas');
+    console.log('Successfully connected to Neon DB (PostgreSQL) and ensured contacts table exists.');
   } catch (error) {
-    console.error('WARNING: Could not connect to MongoDB Atlas.');
+    console.error('WARNING: Could not connect to Neon DB.');
     console.error('Error Details:', error.message);
     console.log('Server will continue running with SMTP email fallback only.');
   }
@@ -98,39 +108,33 @@ app.get('/api/health', (req, res) => {
 });
 
 app.post('/api/contact', async (req, res) => {
-  const { name, email, message } = req.body;
+  const { name, email, phone, message } = req.body;
 
-  if (!name || !email || !message) {
-    return res.status(400).json({ error: 'Name, email, and message are required.' });
+  if (!name || !email || !phone || !message) {
+    return res.status(400).json({ error: 'Name, email, phone, and message are required.' });
   }
-
-  const contactRecord = {
-    name,
-    email,
-    message,
-    createdAt: new Date(),
-  };
 
   const mailOptions = {
     from: `Weblancee Contact Form <${process.env.SMTP_USER}>`,
     replyTo: `${name} <${email}>`,
     to: process.env.CONTACT_RECEIVER,
     subject: `New contact from ${name}`,
-    text: `Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`,
-    html: `<p><strong>Name:</strong> ${name}</p><p><strong>Email:</strong> ${email}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p>`,
+    text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone}\n\nMessage:\n${message}`,
+    html: `<p><strong>Name:</strong> ${name}</p><p><strong>Email:</strong> ${email}</p><p><strong>Phone:</strong> ${phone}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p>`,
   };
 
   try {
     // Save to DB — isolate so DB failure doesn't block email
-    if (dbConnected && contactsCollection) {
+    if (dbConnected && pgPool) {
       try {
-        await contactsCollection.insertOne(contactRecord);
-        console.log('Saved contact submission to MongoDB');
+        const query = 'INSERT INTO contacts (name, email, phone, message) VALUES ($1, $2, $3, $4)';
+        await pgPool.query(query, [name, email, phone, message]);
+        console.log('Saved contact submission to Neon DB');
       } catch (dbErr) {
-        console.error('MongoDB insert failed (continuing with email):', dbErr.message);
+        console.error('Neon DB insert failed (continuing with email):', dbErr.message);
       }
     } else {
-      console.log('Database not connected. Skipping MongoDB insert.');
+      console.log('Database not connected. Skipping Neon DB insert.');
     }
 
     // Send email with one retry on transient failure
